@@ -36,6 +36,7 @@ export const defaultOptions: EncodeOptions = {
   progressiveQuality: 25,
   scalingMode: 1, // 1/2
   blur: 0,
+  postBlur: 0,
   previewProgressiveFrame: false,
   independentMainLayer: false,
   tiling: AVIFTiling.auto,

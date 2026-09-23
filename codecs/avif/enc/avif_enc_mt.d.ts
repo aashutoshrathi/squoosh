@@ -30,6 +30,7 @@ export interface EncodeOptions {
   progressiveQuality: number;
   scalingMode: number;
   blur: number;
+  postBlur: number;
   previewProgressiveFrame: boolean;
   independentMainLayer: boolean;
   tiling: AVIFTiling;

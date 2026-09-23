@@ -79,10 +79,17 @@ struct AvifOptions {
   // resolution (via AOM's scaling mode) while the layer keeps the full render
   // size. In the preview it's the fraction the base content is downscaled to.
   int scalingMode;
-  // Gaussian blur applied to the base layer, as a percentage of the image's
-  // larger dimension (so it's visually consistent across image sizes). Converted
-  // to a pixel sigma at encode time. 0 = no blur.
+  // Gaussian blur applied to the base layer before encoding, as a percentage of
+  // the image's larger dimension (so it's visually consistent across image
+  // sizes). Converted to a pixel sigma at encode time. 0 = no blur.
   float blur;
+  // Strength of the blur the decoder applies to the progressive base layer
+  // after decoding, from 0 (none) to 1 (strongest). It's a low-pass loop
+  // restoration filter, so unlike the pre-blur it smooths coding artifacts as
+  // well as detail (see ScopedLrBlur). It works at the base layer's coded
+  // resolution, so smaller scaling modes give a wider blur. Not applied to
+  // 12-bit images, where libavif disables loop restoration.
+  float postBlur;
   // When set (and progressive is set), encode just the base layer's content so
   // the user can preview what the progressive frame looks like. It's written as
   // a plain single-image AVIF of the blurred, downscaled base content, returned
@@ -112,17 +119,61 @@ struct AvifOptions {
 
 // The scaling ratios AOM supports for layered (progressive) encoding. Indexed by
 // AvifOptions::scalingMode. Mirrors scalingModeMap in libavif's src/codec_aom.c;
-// any other fraction is rejected by libavif at encode time.
+// any other fraction is rejected by libavif at encode time. 1/16 comes from our
+// libaom and libavif patches; it's the most AV1 allows while the final layer
+// can still predict from the base layer.
 struct ScalingRatio {
   int32_t n;
   int32_t d;
 };
 static const ScalingRatio kScalingModes[] = {
-    {1, 1}, {1, 2}, {1, 4}, {1, 8}, {3, 4}, {3, 5}, {4, 5},
+    {1, 1}, {1, 2}, {1, 4}, {1, 8}, {3, 4}, {3, 5}, {4, 5}, {1, 16},
 };
 static const int kScalingModeCount = sizeof(kScalingModes) / sizeof(kScalingModes[0]);
 
 thread_local const val Uint8Array = val::global("Uint8Array");
+
+// From our libaom patch (patches/libaom.patch). While set, every frame
+// libaom encodes gets a fixed, symmetric low-pass Wiener loop-restoration
+// filter on all planes instead of the usual restoration search. tap1 and tap2
+// are the outer taps in 1/128ths; 0, 0 turns it off.
+extern "C" void av1_squoosh_set_lr_blur(int tap1, int tap2);
+
+// Blurs every frame libaom encodes while in scope. The blur is applied by the
+// decoder, after coding, so unlike a pre-process blur it also smooths away the
+// coding artifacts of a low-quality layer. Frames are encoded synchronously
+// inside avifEncoderAddImage/avifEncoderWrite (libavif sets lag-in-frames to
+// 0), so scoping this around one of those calls blurs exactly that image,
+// including its alpha.
+//
+// Strength runs from 0 (off) to 1: [8 32 48 32 8]/128 horizontally and
+// vertically, which is close to the strongest blur a single Wiener pass
+// allows. (AV1 caps tap1 at 8, and a zero response at the Nyquist frequency
+// needs tap0 + tap2 = 32. The outermost 7-tap coefficient stays 0 so the same
+// kernel works on chroma, which only has 5 taps.) Because it runs on the coded
+// frame, a downscaled progressive base layer gets a proportionally wider blur
+// once it's upscaled for display.
+class ScopedLrBlur {
+ public:
+  explicit ScopedLrBlur(float strength) {
+    strength = std::min(std::max(strength, 0.0f), 1.0f);
+    av1_squoosh_set_lr_blur(static_cast<int>(std::lround(8.0f * strength)),
+                            static_cast<int>(std::lround(32.0f * strength)));
+  }
+  ~ScopedLrBlur() { av1_squoosh_set_lr_blur(0, 0); }
+  ScopedLrBlur(const ScopedLrBlur&) = delete;
+  ScopedLrBlur& operator=(const ScopedLrBlur&) = delete;
+};
+
+// Makes sure loop restoration is enabled in the sequence header, which the
+// blur needs. The all-intra usage (used by plain single-image encodes, like
+// the progressive preview) defaults it to off. libavif turns it back off for
+// 12-bit images to avoid a libaom overflow bug, so 12-bit images don't get the
+// blur.
+static bool enableLoopRestoration(avifEncoder* encoder) {
+  return avifEncoderSetCodecSpecificOption(encoder, "enable-restoration", "1") ==
+         AVIF_RESULT_OK;
+}
 
 // Runs `body(y)` for every row y in [0, rows), splitting the range across
 // threads. The blur runs before any libaom encoder (and thus its worker
@@ -467,6 +518,7 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
   // value gives a visually consistent blur regardless of image size. Convert it
   // to a pixel sigma for the blur itself.
   const float blurSigma = options.blur / 100.0f * std::max(width, height);
+  const bool postBlurBase = options.postBlur > 0.0f;
 
   // Resolve the scaling fraction for the progressive base layer.
   int scalingIndex = options.scalingMode;
@@ -482,7 +534,9 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
   // decodable (dav1d fails it outright; some decoders render it blank); only
   // layered images whose final layer is full resolution decode everywhere. So
   // the preview is a plain single-image AVIF of the blurred, downscaled base
-  // content, returned at the reduced size.
+  // content, returned at the reduced size. It gets the same post-blur as the
+  // base layer, which (being applied to the coded frame) matches the base
+  // layer's post-blur relative to the image content.
   if (preview) {
     std::vector<uint8_t> blurred(rgba, rgba + static_cast<size_t>(width) * height * 4);
     gaussianBlurRGBA(blurred.data(), width, height, blurSigma);
@@ -512,9 +566,16 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
     if (!applyCodecSpecificOptions(encoder.get(), options)) {
       return val::null();
     }
+    if (postBlurBase && !enableLoopRestoration(encoder.get())) {
+      return val::null();
+    }
 
     avifRWData output = AVIF_DATA_EMPTY;
-    avifResult result = avifEncoderWrite(encoder.get(), previewImage.get(), &output);
+    avifResult result;
+    {
+      ScopedLrBlur postBlur(options.postBlur);
+      result = avifEncoderWrite(encoder.get(), previewImage.get(), &output);
+    }
     val js_result = val::null();
     if (result == AVIF_RESULT_OK) {
       js_result = Uint8Array.new_(typed_memory_view(output.size, output.data));
@@ -523,12 +584,14 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
     return js_result;
   }
 
-  // The base layer for progressive output: the full-size image with a Gaussian
-  // blur applied. The resolution reduction is signalled to AOM via scalingMode
-  // (AOM encodes the AV1 frame at a lower internal resolution and records the
-  // full render size); the image handed to the encoder is full size.
+  // The base layer for progressive output: the full-size image, with the
+  // Gaussian pre-blur applied if requested. The resolution reduction is
+  // signalled to AOM via scalingMode (AOM encodes the AV1 frame at a lower
+  // internal resolution and records the full render size); the image handed to
+  // the encoder is full size. The post-blur is applied by the decoder via loop
+  // restoration (see ScopedLrBlur).
   AvifImagePtr baseImage(nullptr, avifImageDestroy);
-  if (needBaseLayer) {
+  if (needBaseLayer && blurSigma > 0.0f) {
     std::vector<uint8_t> baseRGBA(rgba, rgba + static_cast<size_t>(width) * height * 4);
     gaussianBlurRGBA(baseRGBA.data(), width, height, blurSigma);
     baseImage = rgbaToAvifImage(baseRGBA.data(), width, height, depth, format, lossless,
@@ -538,7 +601,8 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
     }
   }
 
-  // The final, full-resolution, highest-quality image.
+  // The final, full-resolution, highest-quality image. Without a pre-blur it
+  // doubles as the base layer's source.
   AvifImagePtr image = rgbaToAvifImage(rgba, width, height, depth, format, lossless,
                                        options.premultiplyAlpha, options.enableSharpYUV);
   if (image == nullptr) {
@@ -561,6 +625,9 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
   if (!applyCodecSpecificOptions(encoder.get(), options)) {
     return val::null();
   }
+  if (needBaseLayer && postBlurBase && !enableLoopRestoration(encoder.get())) {
+    return val::null();
+  }
 
   const int finalQualityAlpha =
       options.qualityAlpha == -1 ? options.quality : options.qualityAlpha;
@@ -576,8 +643,15 @@ val encode(std::string buffer, int width, int height, AvifOptions options) {
     encoder->quality = options.progressiveQuality;
     encoder->qualityAlpha = options.progressiveQuality;
     encoder->scalingMode = baseScaling;
-    if (avifEncoderAddImage(encoder.get(), baseImage.get(), 1, AVIF_ADD_IMAGE_FLAG_NONE) !=
-        AVIF_RESULT_OK) {
+    avifResult baseResult;
+    {
+      // Only the base layer is post-blurred; the final layer is left to libaom's
+      // normal loop restoration search.
+      ScopedLrBlur postBlur(options.postBlur);
+      avifImage* baseSource = baseImage ? baseImage.get() : image.get();
+      baseResult = avifEncoderAddImage(encoder.get(), baseSource, 1, AVIF_ADD_IMAGE_FLAG_NONE);
+    }
+    if (baseResult != AVIF_RESULT_OK) {
       return val::null();
     }
 
@@ -625,6 +699,7 @@ EMSCRIPTEN_BINDINGS(my_module) {
       .field("progressiveQuality", &AvifOptions::progressiveQuality)
       .field("scalingMode", &AvifOptions::scalingMode)
       .field("blur", &AvifOptions::blur)
+      .field("postBlur", &AvifOptions::postBlur)
       .field("previewProgressiveFrame", &AvifOptions::previewProgressiveFrame)
       .field("independentMainLayer", &AvifOptions::independentMainLayer)
       .field("tiling", &AvifOptions::tiling);

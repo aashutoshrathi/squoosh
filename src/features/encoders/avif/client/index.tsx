@@ -47,6 +47,7 @@ interface State {
   progressiveQuality: number;
   scalingMode: number;
   blur: number;
+  postBlur: number;
   previewProgressiveFrame: boolean;
   independentMainLayer: boolean;
   tiling: AVIFTiling;
@@ -100,6 +101,7 @@ export class Options extends Component<Props, State> {
       progressiveQuality: options.progressiveQuality,
       scalingMode: options.scalingMode,
       blur: options.blur,
+      postBlur: options.postBlur,
       previewProgressiveFrame: options.previewProgressiveFrame,
       independentMainLayer: options.independentMainLayer,
       tiling: options.tiling,
@@ -160,6 +162,7 @@ export class Options extends Component<Props, State> {
           progressiveQuality: optionState.progressiveQuality,
           scalingMode: optionState.scalingMode,
           blur: optionState.blur,
+          postBlur: optionState.postBlur,
           // Previewing the progressive frame only makes sense while progressive
           // is on; clear it otherwise so a stale preview can't be encoded.
           previewProgressiveFrame:
@@ -203,6 +206,7 @@ export class Options extends Component<Props, State> {
       progressiveQuality,
       scalingMode,
       blur,
+      postBlur,
       previewProgressiveFrame,
       independentMainLayer,
       tiling,
@@ -399,6 +403,7 @@ export class Options extends Component<Props, State> {
                               <option value="1">1/2</option>
                               <option value="2">1/4</option>
                               <option value="3">1/8</option>
+                              <option value="7">1/16</option>
                             </Select>
                           </label>
                           <div class={style.optionOneCell}>
@@ -409,7 +414,18 @@ export class Options extends Component<Props, State> {
                               value={blur}
                               onInput={this._inputChange('blur', 'number')}
                             >
-                              Progressive layer blur:
+                              Progressive pre-blur:
+                            </Range>
+                          </div>
+                          <div class={style.optionOneCell}>
+                            <Range
+                              min="0"
+                              max="1"
+                              step="0.01"
+                              value={postBlur}
+                              onInput={this._inputChange('postBlur', 'number')}
+                            >
+                              Progressive post-blur:
                             </Range>
                           </div>
                           <label class={style.optionToggle}>

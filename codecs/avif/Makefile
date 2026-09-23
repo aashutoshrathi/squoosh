@@ -16,6 +16,14 @@ CODEC_DIR = node_modules/libavif
 BUILD_DIR = node_modules/build
 LIBAOM_DIR = node_modules/libaom
 
+# Squoosh's changes to libaom and libavif, for the progressive base layer:
+# - av1_squoosh_set_lr_blur(), which forces a fixed low-pass loop restoration
+#   filter. avif_enc.cpp uses it to blur the base layer in the decoder, after
+#   coding, so the blur also hides coding artifacts.
+# - A 1/16 scaling mode (AOM stops at 1/8), which libavif needs to accept too.
+LIBAOM_PATCH = patches/libaom.patch
+LIBAVIF_PATCH = patches/libavif.patch
+
 # We must build libsharpyuv from the libwebp revision libavif expects.
 # libavif v1.4.2's ext/libsharpyuv.cmd clones libwebp v1.6.0, so track that tag.
 LIBWEBP_VERSION = v1.6.0
@@ -178,19 +186,23 @@ $(LIBAOM_OUT): $(LIBAOM_STAMP) $(MAKEFILE_DEPS)
 
 # ---- source fetch (stamped by pinned version - see STAMP_DIR above) ---------
 
-$(LIBAOM_STAMP):
+# Patches are prerequisites of their fetch so editing one re-extracts a clean
+# tree to apply it to (patching an already-patched tree would fail).
+$(LIBAOM_STAMP): $(LIBAOM_PATCH)
 	$(RM) -r $(LIBAOM_DIR) $(STAMP_DIR)/libaom-*
 	mkdir -p $(LIBAOM_DIR) $(STAMP_DIR)
 	curl -sL $(LIBAOM_URL) | tar xzm -C $(LIBAOM_DIR)
+	patch -p1 -d $(LIBAOM_DIR) < $(LIBAOM_PATCH)
 	touch $@
 
 # Refreshing libavif wipes ext/libwebp with it, so drop the libwebp stamp too -
 # that forces the libwebp fetch below to re-run rather than leaving a stamp
 # claiming a tree that no longer exists.
-$(LIBAVIF_STAMP):
+$(LIBAVIF_STAMP): $(LIBAVIF_PATCH)
 	$(RM) -r $(CODEC_DIR) $(STAMP_DIR)/libavif-* $(STAMP_DIR)/libwebp-*
 	mkdir -p $(CODEC_DIR) $(STAMP_DIR)
 	curl -sL $(LIBAVIF_URL) | tar xzm --strip 1 -C $(CODEC_DIR)
+	patch -p1 -d $(CODEC_DIR) < $(LIBAVIF_PATCH)
 	touch $@
 
 # libwebp is extracted INTO the libavif tree, so it must be fetched after it.
