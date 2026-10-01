@@ -9,7 +9,18 @@ export function cacheOrNetwork(event: FetchEvent): void {
       const cachedResponse = await caches.match(event.request, {
         ignoreSearch: true,
       });
-      return cachedResponse || fetch(event.request);
+      const response = cachedResponse || (await fetch(event.request));
+      if (event.request.mode === 'navigate') {
+        const newHeaders = new Headers(response.headers);
+        newHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+        newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: newHeaders,
+        });
+      }
+      return response;
     })(),
   );
 }
@@ -46,8 +57,8 @@ export function cacheOrNetworkAndCache(
 export function serveShareTarget(event: FetchEvent): void {
   const dataPromise = event.request.formData();
 
-  // Redirect so the user can refresh the page without resending data.
-  event.respondWith(Response.redirect('/?share-target'));
+  const redirectTarget = new URL('?share-target', self.registration.scope).href;
+  event.respondWith(Response.redirect(redirectTarget));
 
   event.waitUntil(
     (async function () {
@@ -70,13 +81,22 @@ export function cleanupCache(
     (async function () {
       const cache = await caches.open(cacheName);
 
-      // Clean old entries from the dynamic cache.
       const requests = await cache.keys();
+      const scopePath = new URL(self.registration.scope).pathname.replace(
+        /^\/+/,
+        '',
+      );
       const promises = requests.map((cachedRequest) => {
-        // Get pathname without leading /
-        const assetPath = new URL(cachedRequest.url).pathname.slice(1);
-        // If it isn't one of our keepAssets, we don't need it anymore.
-        if (!keepAssets.includes(assetPath)) return cache.delete(cachedRequest);
+        const assetPath = new URL(cachedRequest.url).pathname.replace(
+          /^\/+/,
+          '',
+        );
+        const relPath = assetPath.startsWith(scopePath)
+          ? assetPath.slice(scopePath.length).replace(/^\/+/, '')
+          : assetPath;
+        if (!keepAssets.includes(relPath) && !keepAssets.includes(assetPath)) {
+          return cache.delete(cachedRequest);
+        }
       });
 
       await Promise.all<any>(promises);

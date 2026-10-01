@@ -1,4 +1,4 @@
-import { h, Component } from 'preact';
+import { h, Component, ComponentType, Fragment } from 'preact';
 
 import * as style from './style.css';
 import 'add-css:./style.css';
@@ -16,6 +16,7 @@ import Expander from './Expander';
 import Toggle from './Toggle';
 import Select from './Select';
 import { Options as QuantOptionsComponent } from 'features/processors/quantize/client';
+import { Options as SetBackgroundOptionsComponent } from 'features/processors/setBackground/client';
 import { Options as ResizeOptionsComponent } from 'features/processors/resize/client';
 import { ImportIcon, SaveIcon, SwapIcon } from 'client/lazy-app/icons';
 
@@ -25,6 +26,13 @@ interface Props {
   source?: SourceImage;
   encoderState?: EncoderState;
   processorState: ProcessorState;
+  /**
+   * The source file, when the encoder could transcode it directly rather than
+   * encode the processed pixels. Only JPEG XL does anything with this; the
+   * other codecs' Options components ignore it. See `transcodeSourceFor` in
+   * Compress.
+   */
+  transcodeSource?: File;
   onEncoderTypeChange(index: 0 | 1, newType: OutputType): void;
   onEncoderOptionsChange(index: 0 | 1, newOptions: EncoderOptions): void;
   onProcessorOptionsChange(index: 0 | 1, newOptions: ProcessorState): void;
@@ -124,6 +132,15 @@ export default class Options extends Component<Props, State> {
     );
   };
 
+  private onSetBackgroundOptionsChange = (
+    opts: ProcessorOptions['setBackground'],
+  ) => {
+    this.props.onProcessorOptionsChange(
+      this.props.index,
+      cleanMerge(this.props.processorState, 'setBackground', opts),
+    );
+  };
+
   private onResizeOptionsChange = (opts: ProcessorOptions['resize']) => {
     this.props.onProcessorOptionsChange(
       this.props.index,
@@ -148,12 +165,21 @@ export default class Options extends Component<Props, State> {
   };
 
   render(
-    { source, encoderState, processorState }: Props,
+    { source, encoderState, processorState, transcodeSource }: Props,
     { supportedEncoderMap }: State,
   ) {
-    const encoder = encoderState && encoderMap[encoderState.type];
-    const EncoderOptionComponent =
-      encoder && 'Options' in encoder ? encoder.Options : undefined;
+    const encoder =
+      encoderState && encoderState.type in encoderMap
+        ? encoderMap[encoderState.type]
+        : undefined;
+    // `encoder.Options` is a union of every codec's Options component. Rendering
+    // a union component makes TypeScript intersect all their prop types, and
+    // that intersection collapses to `never` as soon as two codecs declare the
+    // same option name with different types. The options value is already cast
+    // to `any` below, so erase the prop type here to avoid the bogus `never`.
+    const EncoderOptionComponent = (
+      encoder && 'Options' in encoder ? encoder.Options : undefined
+    ) as ComponentType<any> | undefined;
 
     return (
       <div
@@ -228,6 +254,27 @@ export default class Options extends Component<Props, State> {
                 ) : null}
               </Expander>
 
+              {source && source.hasTransparency ? (
+                <Fragment>
+                  <label class={style.sectionEnabler}>
+                    Set background
+                    <Toggle
+                      name="setBackground.enable"
+                      checked={!!processorState.setBackground.enabled}
+                      onChange={this.onProcessorEnabledChange}
+                    />
+                  </label>
+                  <Expander>
+                    {processorState.setBackground.enabled ? (
+                      <SetBackgroundOptionsComponent
+                        options={processorState.setBackground}
+                        onChange={this.onSetBackgroundOptionsChange}
+                      />
+                    ) : null}
+                  </Expander>
+                </Fragment>
+              ) : null}
+
               <label class={style.sectionEnabler}>
                 Reduce palette
                 <Toggle
@@ -253,7 +300,11 @@ export default class Options extends Component<Props, State> {
         <section class={`${style.optionOneCell} ${style.optionsSection}`}>
           {supportedEncoderMap ? (
             <Select
-              value={encoderState ? encoderState.type : 'identity'}
+              value={
+                encoderState && encoderState.type in encoderMap
+                  ? encoderState.type
+                  : 'identity'
+              }
               onChange={this.onEncoderTypeChange}
               large
             >
@@ -279,6 +330,7 @@ export default class Options extends Component<Props, State> {
                 // the correct type, but typescript isn't smart enough.
                 encoderState!.options as any
               }
+              transcodeSource={transcodeSource}
               onChange={this.onEncoderOptionsChange}
             />
           )}

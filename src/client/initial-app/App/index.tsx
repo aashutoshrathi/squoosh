@@ -12,7 +12,9 @@ import 'shared/custom-els/snack-bar';
 import Intro from 'shared/prerendered-app/Intro';
 import 'shared/custom-els/loading-spinner';
 
-const ROUTE_EDITOR = '/editor';
+console.log(
+  `Hello fellow developer! If you'd like to see ssimulacra2 results in the console, set window.logQuality = true;`,
+);
 
 const compressPromise = import('client/lazy-app/Compress');
 const swBridgePromise = import('client/lazy-app/sw-bridge');
@@ -57,8 +59,9 @@ export default class App extends Component<Props, State> {
       offliner(this.showSnack);
       if (!this.state.awaitingShareTarget) return;
       const file = await getSharedImage();
-      // Remove the ?share-target from the URL
-      history.replaceState('', '', '/');
+      const cleanURL = new URL(location.href);
+      cleanURL.searchParams.delete('share-target');
+      history.replaceState('', '', cleanURL.href);
       this.openEditor();
       this.setState({ file, awaitingShareTarget: false });
     });
@@ -95,14 +98,15 @@ export default class App extends Component<Props, State> {
   };
 
   private onPopState = () => {
-    this.setState({ isEditorOpen: location.pathname === ROUTE_EDITOR });
+    this.setState({ isEditorOpen: location.pathname.endsWith('/editor') });
   };
 
   private openEditor = () => {
     if (this.state.isEditorOpen) return;
-    // Change path, but preserve query string.
     const editorURL = new URL(location.href);
-    editorURL.pathname = ROUTE_EDITOR;
+    editorURL.pathname =
+      editorURL.pathname.replace(/\/editor\/?$/, '').replace(/\/$/, '') +
+      '/editor';
     history.pushState(null, '', editorURL.href);
     this.setState({ isEditorOpen: true });
   };
