@@ -54,16 +54,19 @@ self.addEventListener('fetch', (event) => {
   // Don't care about other-origin URLs
   if (url.origin !== location.origin) return;
 
-  if (url.pathname === '/editor') {
-    event.respondWith(Response.redirect('/'));
+  if (url.pathname === '/editor' || url.pathname.endsWith('/editor')) {
+    event.respondWith(Response.redirect(self.registration.scope || '/'));
     return;
   }
 
-  if (
-    url.pathname === '/' &&
+  const isShareTarget =
+    (url.pathname === '/' ||
+      url.href === self.registration.scope ||
+      url.pathname === new URL(self.registration.scope).pathname) &&
     url.searchParams.has('share-target') &&
-    event.request.method === 'POST'
-  ) {
+    event.request.method === 'POST';
+
+  if (isShareTarget) {
     serveShareTarget(event);
     return;
   }

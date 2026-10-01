@@ -72,7 +72,9 @@ export class Options extends Component<Props, State> {
           <Select name="mode" value={mode} onChange={this.onChange}>
             <option value="rgba">All</option>
             <option value="alphaOnly">Alpha only</option>
-            {extendedSettings && <option value="zx">ZX</option>}
+            {(extendedSettings || mode === 'zx') && (
+              <option value="zx">ZX</option>
+            )}
           </Select>
         </label>
         <Expander>

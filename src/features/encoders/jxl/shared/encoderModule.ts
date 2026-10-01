@@ -28,8 +28,6 @@ let emscriptenModule: Promise<JXLModule> | undefined;
 export function getEncoderModule(): Promise<JXLModule> {
   if (!emscriptenModule) {
     emscriptenModule = (async () => {
-      // Single SIMD build, no threads. All modern browsers support WebAssembly
-      // SIMD, and libjxl benefits far more from SIMD than from worker threads.
       const jxlEncoder = await import('codecs/jxl/enc/jxl_enc');
       return initEmscriptenModule(jxlEncoder.default);
     })();

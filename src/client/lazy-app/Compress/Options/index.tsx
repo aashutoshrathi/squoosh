@@ -1,4 +1,4 @@
-import { h, Component, ComponentType } from 'preact';
+import { h, Component, ComponentType, Fragment } from 'preact';
 
 import * as style from './style.css';
 import 'add-css:./style.css';
@@ -16,6 +16,7 @@ import Expander from './Expander';
 import Toggle from './Toggle';
 import Select from './Select';
 import { Options as QuantOptionsComponent } from 'features/processors/quantize/client';
+import { Options as SetBackgroundOptionsComponent } from 'features/processors/setBackground/client';
 import { Options as ResizeOptionsComponent } from 'features/processors/resize/client';
 import { ImportIcon, SaveIcon, SwapIcon } from 'client/lazy-app/icons';
 
@@ -131,6 +132,15 @@ export default class Options extends Component<Props, State> {
     );
   };
 
+  private onSetBackgroundOptionsChange = (
+    opts: ProcessorOptions['setBackground'],
+  ) => {
+    this.props.onProcessorOptionsChange(
+      this.props.index,
+      cleanMerge(this.props.processorState, 'setBackground', opts),
+    );
+  };
+
   private onResizeOptionsChange = (opts: ProcessorOptions['resize']) => {
     this.props.onProcessorOptionsChange(
       this.props.index,
@@ -158,7 +168,10 @@ export default class Options extends Component<Props, State> {
     { source, encoderState, processorState, transcodeSource }: Props,
     { supportedEncoderMap }: State,
   ) {
-    const encoder = encoderState && encoderMap[encoderState.type];
+    const encoder =
+      encoderState && encoderState.type in encoderMap
+        ? encoderMap[encoderState.type]
+        : undefined;
     // `encoder.Options` is a union of every codec's Options component. Rendering
     // a union component makes TypeScript intersect all their prop types, and
     // that intersection collapses to `never` as soon as two codecs declare the
@@ -241,6 +254,27 @@ export default class Options extends Component<Props, State> {
                 ) : null}
               </Expander>
 
+              {source && source.hasTransparency ? (
+                <Fragment>
+                  <label class={style.sectionEnabler}>
+                    Set background
+                    <Toggle
+                      name="setBackground.enable"
+                      checked={!!processorState.setBackground.enabled}
+                      onChange={this.onProcessorEnabledChange}
+                    />
+                  </label>
+                  <Expander>
+                    {processorState.setBackground.enabled ? (
+                      <SetBackgroundOptionsComponent
+                        options={processorState.setBackground}
+                        onChange={this.onSetBackgroundOptionsChange}
+                      />
+                    ) : null}
+                  </Expander>
+                </Fragment>
+              ) : null}
+
               <label class={style.sectionEnabler}>
                 Reduce palette
                 <Toggle
@@ -266,7 +300,11 @@ export default class Options extends Component<Props, State> {
         <section class={`${style.optionOneCell} ${style.optionsSection}`}>
           {supportedEncoderMap ? (
             <Select
-              value={encoderState ? encoderState.type : 'identity'}
+              value={
+                encoderState && encoderState.type in encoderMap
+                  ? encoderState.type
+                  : 'identity'
+              }
               onChange={this.onEncoderTypeChange}
               large
             >

@@ -31,7 +31,7 @@ import * as oxi from 'entry-data:codecs/oxipng/pkg/squoosh_oxipng';
 import * as webpEnc from 'entry-data:codecs/webp/enc/webp_enc';
 
 export function shouldCacheDynamically(url: string) {
-  return url.startsWith('/c/demo-');
+  return url.includes('/c/demo-');
 }
 
 let initialJs = new Set([
@@ -47,21 +47,17 @@ initialJs = subtractSets(
   new Set([
     initialApp.main,
     ...initialApp.deps.filter(
-      (item) =>
-        // Exclude JS deps that have been inlined:
-        item.endsWith('.js') ||
-        // As well as large image deps we want to keep dynamic:
-        shouldCacheDynamically(item),
+      (item) => item.endsWith('.js') || shouldCacheDynamically(item),
     ),
-    // Exclude features Worker itself - it's referenced from the main app,
-    // but is meant to be cached lazily.
     featuresWorker.main,
-    // Also exclude Service Worker itself (we're inside right now).
     swUrl,
   ]),
 );
 
-export const initial = ['/', ...initialJs];
+export const initial = [
+  self.registration ? self.registration.scope : '.',
+  ...initialJs,
+];
 
 export const theRest = (async () => {
   const items: string[] = [];

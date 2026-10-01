@@ -70,3 +70,5 @@ export const siteOrigin = (() => {
   );
   return 'https://squoosh.app';
 })();
+
+export const publicPath = (process.env.PUBLIC_PATH || '').replace(/\/$/, '');

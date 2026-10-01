@@ -68,6 +68,10 @@ export async function offliner(showSnack: SnackBarElement['showSnackbar']) {
   navigator.serviceWorker.addEventListener('controllerchange', async () => {
     // Is it the first install?
     if (!hasController) {
+      if (!window.crossOriginIsolated) {
+        location.reload();
+        return;
+      }
       showSnack('Ready to work offline', { timeout: 5000 });
       return;
     }

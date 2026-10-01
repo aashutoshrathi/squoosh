@@ -49,16 +49,24 @@ for (const methodName of methodNames) {
         const onAbort = () => this._terminateWorker();
         signal.addEventListener('abort', onAbort);
 
+        const worker = this._worker!;
+        let onError: (event: ErrorEvent) => void;
+        const workerError = new Promise<never>((_resolve, reject) => {
+          onError = (event: ErrorEvent) => {
+            reject(event.error || Error(event.message));
+          };
+          worker.addEventListener('error', onError);
+        });
+
         return abortable(
           signal,
           // @ts-ignore - TypeScript can't figure this out
-          this._workerApi![methodName](...args),
+          Promise.race([this._workerApi![methodName](...args), workerError]),
         ).finally(() => {
-          // No longer care about aborting - this task is complete.
+          worker.removeEventListener('error', onError);
           signal.removeEventListener('abort', onAbort);
 
-          // Start a timer to clear up the worker.
-          this._workerTimeout = setTimeout(() => {
+          this._workerTimeout = window.setTimeout(() => {
             this._terminateWorker();
           }, workerTimeout);
         });

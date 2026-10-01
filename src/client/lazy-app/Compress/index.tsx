@@ -56,6 +56,7 @@ export interface SourceImage {
   mimeType: ImageMimeTypes | 'image/svg+xml' | '';
   decoded: ImageData;
   preprocessed: ImageData;
+  hasTransparency: boolean;
   vectorImage?: HTMLImageElement;
   /**
    * The size `file` would be as `Content-Encoding: br`, in bytes. Only set for
@@ -139,6 +140,16 @@ async function decodeImage(
   }
 }
 
+function hasTransparency(imageData: ImageData): boolean {
+  const pixels = imageData.data;
+
+  for (let i = 3; i < pixels.length; i += 4) {
+    if (pixels[i] !== 255) return true;
+  }
+
+  return false;
+}
+
 /**
  * Measure the brotli size of a vector source, for `SourceImage.brotliSize`.
  *
@@ -206,6 +217,13 @@ async function processImage(
   if (processorState.resize.enabled) {
     result = await resize(signal, source, processorState.resize, workerBridge);
   }
+  if (source.hasTransparency && processorState.setBackground.enabled) {
+    result = await workerBridge.setBackground(
+      signal,
+      result,
+      processorState.setBackground,
+    );
+  }
   // After resizing but before quantize: the reference for quality metrics.
   const metricReference = result;
   if (processorState.quantize.enabled) {
@@ -268,6 +286,133 @@ function stateForNewSourceData(state: State): State {
   return newState;
 }
 
+type StoredProcessorState = Partial<ProcessorState> & {
+  removeTransparency?: ProcessorState['setBackground'];
+};
+
+function normalizeProcessorState(
+  processorState?: StoredProcessorState,
+): ProcessorState {
+  const setBackground =
+    processorState?.setBackground || processorState?.removeTransparency;
+
+  return {
+    quantize: {
+      ...defaultProcessorState.quantize,
+      ...processorState?.quantize,
+    },
+    setBackground: {
+      ...defaultProcessorState.setBackground,
+      ...setBackground,
+    },
+    resize: {
+      ...defaultProcessorState.resize,
+      ...processorState?.resize,
+    },
+  };
+}
+
+function normalizeEncoderState(
+  encoderState?: EncoderState,
+): EncoderState | undefined {
+  if (!encoderState) {
+    return undefined;
+  }
+  if (!(encoderState.type in encoderMap)) {
+    return undefined;
+  }
+
+  const defaultOpts = (encoderMap[encoderState.type]?.meta as any)
+    ?.defaultOptions;
+
+  if (encoderState.type === 'avif') {
+    const options = encoderState.options as any;
+    const channelDepth =
+      options.channelDepth || encoderMap.avif.meta.defaultOptions.channelDepth;
+    return {
+      type: 'avif',
+      options: {
+        ...encoderMap.avif.meta.defaultOptions,
+        ...options,
+        channelDepth,
+      },
+    };
+  }
+
+  if (encoderState.type === 'jxl') {
+    const options = encoderState.options as any;
+    let mode = options.mode;
+    if (!mode) {
+      mode = options.lossless ? 'lossless' : 'lossy';
+    }
+    let progressiveAC = options.progressiveAC;
+    if (progressiveAC === undefined) {
+      if (options.progressive !== undefined) {
+        progressiveAC = Boolean(options.progressive);
+      } else {
+        progressiveAC = encoderMap.jxl.meta.defaultOptions.progressiveAC;
+      }
+    }
+    let effort = options.effort;
+    if (effort === undefined) {
+      if (options.speed !== undefined) {
+        effort = options.speed;
+      } else {
+        effort = encoderMap.jxl.meta.defaultOptions.effort;
+      }
+    }
+
+    return {
+      type: 'jxl',
+      options: {
+        ...encoderMap.jxl.meta.defaultOptions,
+        ...options,
+        mode,
+        progressiveAC,
+        effort,
+      },
+    };
+  }
+
+  if (encoderState.type === 'mozJPEG') {
+    return {
+      type: 'mozJPEG',
+      options: {
+        ...encoderMap.mozJPEG.meta.defaultOptions,
+        ...encoderState.options,
+      },
+    };
+  }
+
+  return {
+    type: encoderState.type,
+    options: {
+      ...defaultOpts,
+      ...encoderState.options,
+    },
+  };
+}
+
+function normalizeSide(side: Side): Side {
+  return {
+    ...side,
+    latestSettings: {
+      ...side.latestSettings,
+      processorState: normalizeProcessorState(
+        side.latestSettings.processorState,
+      ),
+      encoderState: normalizeEncoderState(side.latestSettings.encoderState),
+    },
+    encodedSettings: side.encodedSettings && {
+      ...side.encodedSettings,
+      processorState: normalizeProcessorState(
+        side.encodedSettings.processorState,
+      ),
+      encoderState: normalizeEncoderState(side.encodedSettings.encoderState),
+    },
+  };
+}
+
 async function processSvg(
   signal: AbortSignal,
   blob: Blob,
@@ -288,7 +433,7 @@ async function processSvg(
   const viewBox = svg.getAttribute('viewBox');
   if (viewBox === null) throw Error('SVG must have width/height or viewBox');
 
-  const viewboxParts = viewBox.split(/\s+/);
+  const viewboxParts = viewBox.split(/[\s,]+/);
   svg.setAttribute('width', viewboxParts[2]);
   svg.setAttribute('height', viewboxParts[3]);
 
@@ -381,13 +526,12 @@ export default class Compress extends Component<Props, State> {
     source: undefined,
     loading: false,
     preprocessorState: defaultPreprocessorState,
-    // Tasking catched side settings if available otherwise taking default settings
     sides: [
       localStorage.getItem('leftSideSettings')
-        ? {
+        ? normalizeSide({
             ...JSON.parse(localStorage.getItem('leftSideSettings') as string),
             loading: false,
-          }
+          })
         : {
             latestSettings: {
               processorState: defaultProcessorState,
@@ -396,10 +540,10 @@ export default class Compress extends Component<Props, State> {
             loading: false,
           },
       localStorage.getItem('rightSideSettings')
-        ? {
+        ? normalizeSide({
             ...JSON.parse(localStorage.getItem('rightSideSettings') as string),
             loading: false,
-          }
+          })
         : {
             latestSettings: {
               processorState: defaultProcessorState,
@@ -589,10 +733,10 @@ export default class Compress extends Component<Props, State> {
 
     if (index === 0 && leftSideSettingsString) {
       const oldLeftSideSettings = this.state.sides[index];
-      const newLeftSideSettings = {
+      const newLeftSideSettings = normalizeSide({
         ...this.state.sides[index],
         ...JSON.parse(leftSideSettingsString),
-      };
+      });
       this.setState({
         sides: cleanSet(this.state.sides, index, newLeftSideSettings),
       });
@@ -610,10 +754,10 @@ export default class Compress extends Component<Props, State> {
 
     if (index === 1 && rightSideSettingsString) {
       const oldRightSideSettings = this.state.sides[index];
-      const newRightSideSettings = {
+      const newRightSideSettings = normalizeSide({
         ...this.state.sides[index],
         ...JSON.parse(rightSideSettingsString),
-      };
+      });
       this.setState({
         sides: cleanSet(this.state.sides, index, newRightSideSettings),
       });
@@ -678,7 +822,10 @@ export default class Compress extends Component<Props, State> {
     if (immediate) {
       this.updateImage();
     } else {
-      this.updateImageTimeout = setTimeout(() => this.updateImage(), delay);
+      this.updateImageTimeout = window.setTimeout(
+        () => this.updateImage(),
+        delay,
+      );
     }
   }
 
@@ -872,6 +1019,7 @@ export default class Compress extends Component<Props, State> {
           brotliSize,
           mimeType,
           preprocessed,
+          hasTransparency: hasTransparency(preprocessed),
           file: mainJobState.file,
         };
 
@@ -1096,6 +1244,17 @@ export default class Compress extends Component<Props, State> {
       // brotli size rather than a size on disk.
       const showingSource = !!source && side.file === source.file;
 
+      let typeLabel = 'Original Image';
+      if (
+        side.latestSettings.encoderState &&
+        encoderMap[side.latestSettings.encoderState.type]
+      ) {
+        typeLabel =
+          encoderMap[side.latestSettings.encoderState.type].meta.label;
+      } else if (source) {
+        typeLabel = `Original Image (${source.mimeType || 'unknown type'})`;
+      }
+
       return (
         <Results
           downloadUrl={side.downloadUrl}
@@ -1108,11 +1267,7 @@ export default class Compress extends Component<Props, State> {
           brotli={showingSource && source!.brotliSize !== undefined}
           loading={loading || side.loading}
           flipSide={mobileView || index === 1}
-          typeLabel={
-            side.latestSettings.encoderState
-              ? encoderMap[side.latestSettings.encoderState.type].meta.label
-              : `${side.file ? `${side.file.name}` : 'Original Image'}`
-          }
+          typeLabel={typeLabel}
         />
       );
     });
